@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/ma
 ```
 Либо
 ```bash   
-wget -O nginx-manager-installer.sh https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-installer.sh && chmod +x /usr/local/bin/nginx-manager-installer.sh && sudo ./nginx-manager-installer.sh
+wget -O nginx-manager-installer.sh https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-installer.sh && chmod +x nginx-manager-installer.sh && sudo ./nginx-manager-installer.sh
 ```
 
 При первом запуске скрипт предложит установить себя в `/usr/local/bin/nginx-manager`. Согласитесь — после этого управление сайтами будет доступно одной командой:
