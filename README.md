@@ -20,19 +20,18 @@
 Скопируйте скрипт на VPS и запустите:
 
 ```bash
-    curl -fsSL https://gist.githubusercontent.com/hargluk/53bf586393adf065b2a605b747ba1572/raw/aa9ad107012985e55551f6faa5c98cfa9e845794/nginx-manager-installer.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-installer.sh | sudo bash
 ```
 Либо
-
 ```bash   
-    wget https://gist.githubusercontent.com/hargluk/53bf586393adf065b2a605b747ba1572/raw/aa9ad107012985e55551f6faa5c98cfa9e845794/nginx-manager-installer.sh && chmod +x nginx-manager-installer.sh && sudo ./nginx-manager-installer.sh
+wget -O nginx-manager-installer.sh https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-installer.sh && chmod +x /usr/local/bin/nginx-manager-installer.sh && sudo ./nginx-manager-installer.sh
 ```
 
 При первом запуске скрипт предложит установить себя в `/usr/local/bin/nginx-manager`. Согласитесь — после этого управление сайтами будет доступно одной командой:
 
-   ```bash
-   sudo nginx-manager
-   ```
+```bash
+sudo nginx-manager
+```
 
 > Если вы откажетесь от установки, скрипт продолжит работу, но вы не сможете вызывать его из любого места.
 
@@ -148,7 +147,7 @@
 Если вы больше не хотите использовать `nginx-manager`, просто удалите файл:
 
 ```bash
-    sudo rm /usr/local/bin/nginx-manager
+sudo rm /usr/local/bin/nginx-manager
 ```
 
 Созданные сайты и конфиги останутся нетронутыми.
