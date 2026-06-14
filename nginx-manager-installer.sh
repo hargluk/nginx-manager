@@ -394,7 +394,7 @@ menu() {
     echo "6. Установить пакеты (PHP, MySQL, PostgreSQL, SQLite3, Certbot)"
     echo "0. Выход"
     echo "======================================"
-    read -p "Выберите пункт [1-7]: " choice
+    read -p "Выберите пункт [1-0]: " choice
     case $choice in
         1) create_site_wizard ;;
         2) list_my_sites; press_any_key ;;
