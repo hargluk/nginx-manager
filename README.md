@@ -30,6 +30,10 @@ V2
 ```bash   
 wget -O nginx-manager-installer.sh https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-v2 && chmod +x nginx-manager-installer.sh && sudo ./nginx-manager-installer.sh
 ```
+V5 - Доработаны проверки перед запуском, добавлены и/или изменены некоторые фишки.
+```bash   
+wget -O nginx-manager-installer.sh https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-v5 && chmod +x nginx-manager-installer.sh && sudo ./nginx-manager-installer.sh
+```
 
 При первом запуске скрипт предложит установить себя в `/usr/local/bin/nginx-manager`. Согласитесь — после этого управление сайтами будет доступно одной командой:
 
