@@ -33,13 +33,8 @@ Interactive bash script for simplified creation, removal, enabling/disabling web
 Copy the script to your VPS and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-en | sudo bash
-```
+sudo wget -O /usr/local/bin/nginx-manager https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-en && sudo chmod +x /usr/local/bin/nginx-manager && sudo nginx-manager
 
-Or (if you prefer `wget`):
-
-```bash
-wget -O nginx-manager-installer.sh https://raw.githubusercontent.com/hargluk/nginx-manager/refs/heads/main/nginx-manager-en && chmod +x nginx-manager-en && sudo ./nginx-manager-en
 ```
 
 On first run, the script will ask to install itself to `/usr/local/bin/nginx-manager`. Confirm – then you can manage sites with a single command:
