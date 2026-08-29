@@ -1,0 +1,845 @@
+#!/bin/bash
+
+# --- VERSION ---
+VERSION="6.0"
+
+# --- COLORS ---
+if [ -t 1 ] && command -v tput &> /dev/null; then
+    RED=$(tput setaf 1)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    NC=$(tput sgr0)
+else
+    RED=''; GREEN=''; YELLOW=''; NC=''
+fi
+
+TARGET="/usr/local/bin/nginx-manager"
+
+# ----------------------------------------
+#  SELF-INSTALL (if not run from TARGET)
+# ----------------------------------------
+if [[ "$0" != "$TARGET" && "$0" != *"/nginx-manager" ]]; then
+    echo -e "${YELLOW}This script (version $VERSION) can install itself to $TARGET for convenient calling.${NC}"
+    read -p "Install (copy) itself to $TARGET ? (y/n): " ans
+    if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+        if [[ $EUID -ne 0 ]]; then
+            echo -e "${RED}Installation requires root privileges. Run with sudo.${NC}"
+            exit 1
+        fi
+        cp "$0" "$TARGET"
+        chmod +x "$TARGET"
+        echo -e "${GREEN}Script v$VERSION installed as $TARGET${NC}"
+        echo -e "Now you can run it with: ${YELLOW}sudo nginx-manager${NC}"
+        exec "$TARGET"
+    else
+        echo -e "${YELLOW}Continuing without installation (some limitations may apply).${NC}"
+        echo -e "It is recommended to install for full functionality.\n"
+    fi
+fi
+
+# ----------------------------------------
+#  MAIN (requires root)
+# ----------------------------------------
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}Please run with sudo${NC}"
+    exit 1
+fi
+
+# 1. Check and install nginx
+echo -e "${YELLOW}Checking for nginx...${NC}"
+if ! command -v nginx &> /dev/null; then
+    echo -e "${YELLOW}Nginx not found. Install? (y/n)${NC}"
+    read -p "> " install_nginx
+    if [[ "$install_nginx" == "y" || "$install_nginx" == "Y" ]]; then
+        apt update
+        apt install -y nginx
+        systemctl enable nginx
+        systemctl start nginx
+        echo -e "${GREEN}Nginx installed and started.${NC}"
+    else
+        echo -e "${RED}Nginx is required. Exiting.${NC}"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}Nginx already installed.${NC}"
+fi
+
+# 2. Create necessary folders and list file
+mkdir -p /etc/nginx/sites-available
+mkdir -p /etc/nginx/sites-enabled
+touch /etc/nginx/.my_sites
+
+NGINX_AVAILABLE="/etc/nginx/sites-available"
+NGINX_ENABLED="/etc/nginx/sites-enabled"
+WEB_ROOT="/var/www"
+LIST_FILE="/etc/nginx/.my_sites"
+
+# ----------------------------------------
+#  FUNCTIONS
+# ----------------------------------------
+
+init_list() {
+    touch "$LIST_FILE"
+}
+
+# ---- Get package versions ----
+get_version() {
+    local pkg="$1"
+    case "$pkg" in
+        php)
+            php -v 2>/dev/null | head -1 | awk '{print $2}' | cut -d'-' -f1
+            ;;
+        mysql-server)
+            mysql --version 2>/dev/null | awk '{print $5}' | tr -d ','
+            ;;
+        postgresql)
+            psql --version 2>/dev/null | awk '{print $3}'
+            ;;
+        sqlite3)
+            sqlite3 --version 2>/dev/null | awk '{print $1}'
+            ;;
+        certbot)
+            certbot --version 2>/dev/null | awk '{print $2}'
+            ;;
+        *)
+            echo "?"
+            ;;
+    esac
+}
+
+# ---- Package management (install/remove) ----
+check_packages() {
+    echo "======================================"
+    echo "     Package selection"
+    echo "======================================"
+
+    show_status() {
+        command -v php &> /dev/null && php_installed=1 || php_installed=0
+        command -v mysql &> /dev/null && mysql_installed=1 || mysql_installed=0
+        command -v psql &> /dev/null && postgres_installed=1 || postgres_installed=0
+        command -v sqlite3 &> /dev/null && sqlite_installed=1 || sqlite_installed=0
+        command -v certbot &> /dev/null && certbot_installed=1 || certbot_installed=0
+
+        packages=("php" "mysql-server" "postgresql" "sqlite3" "certbot")
+        names=("PHP (php-fpm, modules)" "MySQL" "PostgreSQL" "SQLite3" "Certbot + Nginx plugin")
+        statuses=($php_installed $mysql_installed $postgres_installed $sqlite_installed $certbot_installed)
+
+        echo "Current status:"
+        for i in "${!packages[@]}"; do
+            if [[ ${statuses[$i]} -eq 1 ]]; then
+                local ver=$(get_version "${packages[$i]}")
+                local status_text="${GREEN}installed (version: $ver)${NC}"
+            else
+                local status_text="${RED}not installed${NC}"
+            fi
+            echo "$((i+1)). ${names[$i]} : $status_text"
+        done
+        echo "9. Install all missing packages"
+        echo "0. Back"
+        echo ""
+    }
+
+    show_status
+    read -p "Enter numbers separated by space (install/remove), or 9, or 0: " choices
+
+    if [[ "$choices" == "0" ]]; then
+        return
+    fi
+
+    if [[ "$choices" == "9" ]]; then
+        local to_install=()
+        for i in "${!packages[@]}"; do
+            if [[ ${statuses[$i]} -eq 0 ]]; then
+                to_install+=("${packages[$i]}")
+            fi
+        done
+        if [[ ${#to_install[@]} -eq 0 ]]; then
+            echo -e "${GREEN}All packages are already installed.${NC}"
+        else
+            echo -e "${YELLOW}Installing: ${to_install[*]}${NC}"
+            apt update
+            for pkg in "${to_install[@]}"; do
+                if [[ "$pkg" == "certbot" ]]; then
+                    apt install -y certbot python3-certbot-nginx
+                else
+                    apt install -y "$pkg"
+                fi
+            done
+            if [[ " ${to_install[*]} " =~ " php " ]]; then
+                apt install -y php-fpm php-mysql php-pgsql php-sqlite3
+            fi
+            systemctl enable mysql 2>/dev/null; systemctl start mysql 2>/dev/null
+            systemctl enable postgresql 2>/dev/null; systemctl start postgresql 2>/dev/null
+            echo -e "${GREEN}Installation complete.${NC}"
+            if [[ " ${to_install[*]} " =~ " certbot " ]]; then
+                echo -e "${YELLOW}Certbot installed. Would you like to obtain a certificate now? (y/n)${NC}"
+                read -p "> " run_cert
+                [[ "$run_cert" == "y" || "$run_cert" == "Y" ]] && ssl_get_cert
+            fi
+        fi
+        show_status
+        read -p "Press Enter..."
+        return
+    fi
+
+    local to_install=()
+    local to_remove=()
+    for num in $choices; do
+        if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#packages[@]} )); then
+            local idx=$((num-1))
+            local pkg="${packages[$idx]}"
+            if [[ ${statuses[$idx]} -eq 0 ]]; then
+                to_install+=("$pkg")
+            else
+                echo -n "${names[$idx]} is already installed. Remove? (y/n): "
+                read ans
+                if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+                    to_remove+=("$pkg")
+                else
+                    echo -e "${YELLOW}Skipping.${NC}"
+                fi
+            fi
+        else
+            echo -e "${RED}Invalid number: $num (skipped)${NC}"
+        fi
+    done
+
+    if [[ ${#to_install[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Installing: ${to_install[*]}${NC}"
+        apt update
+        for pkg in "${to_install[@]}"; do
+            if [[ "$pkg" == "certbot" ]]; then
+                apt install -y certbot python3-certbot-nginx
+            else
+                apt install -y "$pkg"
+            fi
+        done
+        if [[ " ${to_install[*]} " =~ " php " ]]; then
+            apt install -y php-fpm php-mysql php-pgsql php-sqlite3
+        fi
+        [[ " ${to_install[*]} " =~ " mysql-server " ]] && { systemctl enable mysql; systemctl start mysql; }
+        [[ " ${to_install[*]} " =~ " postgresql " ]] && { systemctl enable postgresql; systemctl start postgresql; }
+        echo -e "${GREEN}Installation of selected packages complete.${NC}"
+        if [[ " ${to_install[*]} " =~ " certbot " ]]; then
+            echo -e "${YELLOW}Certbot installed. Would you like to obtain a certificate now? (y/n)${NC}"
+            read -p "> " run_cert
+            [[ "$run_cert" == "y" || "$run_cert" == "Y" ]] && ssl_get_cert
+        fi
+    fi
+
+    if [[ ${#to_remove[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Removing: ${to_remove[*]}${NC}"
+        for pkg in "${to_remove[@]}"; do
+            if [[ "$pkg" == "php" ]]; then
+                apt remove --purge -y php-fpm php-mysql php-pgsql php-sqlite3 2>/dev/null
+                apt remove --purge -y php 2>/dev/null
+            else
+                apt remove --purge -y "$pkg"
+            fi
+        done
+        echo -e "${GREEN}Removal complete.${NC}"
+    fi
+
+    show_status
+    read -p "Press Enter..."
+}
+
+# ---- UFW management ----
+manage_ufw() {
+    echo "======================================"
+    echo "      Port management (UFW)"
+    echo "======================================"
+    
+    if ! command -v ufw &> /dev/null; then
+        echo -e "${YELLOW}UFW not found. Install? (y/n)${NC}"
+        read -p "> " install_ufw
+        if [[ "$install_ufw" == "y" || "$install_ufw" == "Y" ]]; then
+            apt update
+            apt install -y ufw
+            echo -e "${GREEN}UFW installed.${NC}"
+            ufw allow 22/tcp
+            echo -e "${GREEN}Port 22 (SSH) opened.${NC}"
+            read -p "Enable UFW now? (y/n): " enable_ufw
+            if [[ "$enable_ufw" == "y" || "$enable_ufw" == "Y" ]]; then
+                ufw --force enable
+                echo -e "${GREEN}UFW enabled.${NC}"
+            else
+                echo -e "${YELLOW}UFW not enabled. You can enable it later.${NC}"
+            fi
+        else
+            echo -e "${RED}UFW not installed. Cannot manage ports.${NC}"
+            read -p "Press Enter..."
+            return
+        fi
+    fi
+
+    while true; do
+        echo ""
+        echo "1. Show status and rules"
+        echo "2. Open port (e.g., 80, 443, 3000)"
+        echo "3. Close port (remove rule)"
+        echo "4. Enable UFW"
+        echo "5. Disable UFW"
+        echo "6. Back"
+        read -p "Select action [1-6]: " act
+        case $act in
+            1)
+                ufw status verbose
+                read -p "Press Enter..."
+                ;;
+            2)
+                read -p "Enter port number: " port
+                if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+                    echo -e "${RED}Invalid port.${NC}"
+                    continue
+                fi
+                read -p "Protocol (tcp/udp, default tcp): " proto
+                [[ -z "$proto" ]] && proto="tcp"
+                if [[ "$proto" != "tcp" && "$proto" != "udp" ]]; then
+                    echo -e "${RED}Invalid protocol.${NC}"
+                    continue
+                fi
+                ufw allow "$port"/"$proto"
+                echo -e "${GREEN}Port $port/$proto opened.${NC}"
+                read -p "Press Enter..."
+                ;;
+            3)
+                read -p "Enter port number to close: " port
+                if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+                    echo -e "${RED}Invalid port.${NC}"
+                    continue
+                fi
+                read -p "Protocol (tcp/udp, default tcp): " proto
+                [[ -z "$proto" ]] && proto="tcp"
+                if [[ "$proto" != "tcp" && "$proto" != "udp" ]]; then
+                    echo -e "${RED}Invalid protocol.${NC}"
+                    continue
+                fi
+                ufw delete allow "$port"/"$proto"
+                echo -e "${GREEN}Rule for port $port/$proto removed.${NC}"
+                read -p "Press Enter..."
+                ;;
+            4)
+                ufw --force enable
+                echo -e "${GREEN}UFW enabled.${NC}"
+                read -p "Press Enter..."
+                ;;
+            5)
+                ufw disable
+                echo -e "${YELLOW}UFW disabled.${NC}"
+                read -p "Press Enter..."
+                ;;
+            6)
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid choice${NC}"
+                ;;
+        esac
+    done
+}
+
+# ---- Configure Certbot hooks for UFW ----
+configure_certbot_hooks() {
+    echo "======================================"
+    echo "  Configure Certbot hooks for UFW"
+    echo "======================================"
+    
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot is not installed. Please install it first via menu item 6.${NC}"
+        read -p "Press Enter..."
+        return
+    fi
+    
+    if ! command -v ufw &> /dev/null; then
+        echo -e "${YELLOW}UFW not found. Install? (y/n)${NC}"
+        read -p "> " install_ufw
+        if [[ "$install_ufw" == "y" || "$install_ufw" == "Y" ]]; then
+            apt update
+            apt install -y ufw
+            echo -e "${GREEN}UFW installed.${NC}"
+            ufw allow 22/tcp
+            echo -e "${GREEN}Port 22 (SSH) opened.${NC}"
+            read -p "Enable UFW now? (y/n): " enable_ufw
+            if [[ "$enable_ufw" == "y" || "$enable_ufw" == "Y" ]]; then
+                ufw --force enable
+                echo -e "${GREEN}UFW enabled.${NC}"
+            fi
+        else
+            echo -e "${RED}UFW is required for this feature.${NC}"
+            read -p "Press Enter..."
+            return
+        fi
+    else
+        if ! ufw status | grep -q "22/tcp.*ALLOW"; then
+            echo -e "${YELLOW}Port 22 (SSH) is not open. Open it? (y/n)${NC}"
+            read -p "> " open_ssh
+            if [[ "$open_ssh" == "y" || "$open_ssh" == "Y" ]]; then
+                ufw allow 22/tcp
+                echo -e "${GREEN}Port 22 opened.${NC}"
+            fi
+        fi
+    fi
+    
+    CLI_INI="/etc/letsencrypt/cli.ini"
+    mkdir -p /etc/letsencrypt
+    
+    if [[ -f "$CLI_INI" ]]; then
+        sed -i '/^pre-hook = /d' "$CLI_INI"
+        sed -i '/^post-hook = /d' "$CLI_INI"
+    fi
+    
+    echo "pre-hook = ufw allow 80/tcp" >> "$CLI_INI"
+    echo "post-hook = ufw delete allow 80/tcp" >> "$CLI_INI"
+    
+    echo -e "${GREEN}File $CLI_INI updated.${NC}"
+    echo -e "Certbot will automatically open port 80 and close it afterwards."
+    read -p "Press Enter..."
+}
+
+# ---- Script info and removal ----
+about_and_remove() {
+    clear
+    echo "======================================"
+    echo "      Script info and removal"
+    echo "======================================"
+    echo -e "${GREEN}Name:${NC}    nginx-manager"
+    echo -e "${GREEN}Version:${NC} $VERSION"
+    echo -e "${GREEN}Path:${NC}    $TARGET"
+    echo -e "${GREEN}Author:${NC}  hargluk"
+    echo ""
+    echo -e "${YELLOW}If you want to completely remove this script,${NC}"
+    echo -e "${YELLOW}run the following command manually:${NC}"
+    echo -e "  ${GREEN}sudo rm $TARGET${NC}"
+    echo ""
+    read -p "Remove the script now? (y/n): " remove_now
+    if [[ "$remove_now" == "y" || "$remove_now" == "Y" ]]; then
+        if [[ -f "$TARGET" ]]; then
+            rm -f "$TARGET"
+            echo -e "${GREEN}Script removed.${NC}"
+            echo -e "Press Enter to exit."
+            read -p ""
+            exit 0
+        else
+            echo -e "${RED}File $TARGET not found.${NC}"
+        fi
+    fi
+    press_any_key
+}
+
+# ---- Functions for site management ----
+get_all_sites() {
+    local sites=()
+    if [[ -d "$NGINX_AVAILABLE" ]]; then
+        for file in "$NGINX_AVAILABLE"/*; do
+            [[ -f "$file" ]] || continue
+            name=$(basename "$file")
+            name="${name%.conf}"
+            sites+=("$name")
+        done
+    fi
+    echo "${sites[@]}"
+}
+
+site_exists() {
+    local name="$1"
+    [[ -f "$NGINX_AVAILABLE/${name}.conf" || -f "$NGINX_AVAILABLE/$name" ]]
+}
+
+add_to_list() {
+    grep -qxF "$1" "$LIST_FILE" || echo "$1" >> "$LIST_FILE"
+}
+
+remove_from_list() {
+    sed -i "/^$1$/d" "$LIST_FILE"
+}
+
+is_my_site() {
+    grep -qxF "$1" "$LIST_FILE"
+}
+
+create_config() {
+    local name="$1" domain="$2" root_path="$3" type="$4" port="$5"
+    local config_file="$NGINX_AVAILABLE/${name}.conf"
+
+    if site_exists "$name"; then
+        echo -e "${RED}Site $name already exists${NC}"
+        return 1
+    fi
+
+    mkdir -p "$root_path"
+    chown -R www-data:www-data "$root_path"
+    if [[ ! -f "$root_path/index.html" && ! -f "$root_path/index.php" ]]; then
+        echo "<h1>Welcome to $domain</h1><p>Created by nginx-manager</p>" > "$root_path/index.html"
+    fi
+
+    if [[ "$type" == "proxy" ]]; then
+        cat > "$config_file" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain www.$domain;
+    location / {
+        proxy_pass http://127.0.0.1:$port;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+    else
+        cat > "$config_file" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain www.$domain;
+    root $root_path;
+    index index.html index.htm index.php;
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+    fi
+
+    ln -sf "$config_file" "$NGINX_ENABLED/${name}.conf"
+    add_to_list "$name"
+    echo -e "${GREEN}Site $name created and enabled${NC}"
+    return 0
+}
+
+delete_site() {
+    local name="$1"
+    local config_conf="$NGINX_AVAILABLE/${name}.conf"
+    local config_noext="$NGINX_AVAILABLE/$name"
+    if [[ ! -f "$config_conf" && ! -f "$config_noext" ]]; then
+        echo -e "${RED}Site $name not found${NC}"
+        return 1
+    fi
+
+    if ! is_my_site "$name"; then
+        echo -e "${YELLOW}Warning: site $name is not created by this script.${NC}"
+        echo -e "${YELLOW}Deletion may affect other services.${NC}"
+        read -p "Delete site $name? (y/n): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo -e "${RED}Cancelled.${NC}"
+            return 1
+        fi
+    fi
+
+    rm -f "$NGINX_ENABLED/${name}.conf" "$NGINX_ENABLED/$name"
+    rm -f "$config_conf" "$config_noext"
+
+    local root_path="$WEB_ROOT/$name"
+    if [[ -d "$root_path" ]]; then
+        read -p "Delete folder $root_path? (y/n): " confirm
+        [[ "$confirm" == "y" || "$confirm" == "Y" ]] && rm -rf "$root_path" && echo -e "${GREEN}Folder deleted${NC}" || echo -e "${YELLOW}Folder kept${NC}"
+    fi
+
+    remove_from_list "$name"
+    echo -e "${GREEN}Site $name deleted${NC}"
+}
+
+list_my_sites() {
+    local all_sites=($(get_all_sites))
+    if [[ ${#all_sites[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}No sites (configs) found in $NGINX_AVAILABLE.${NC}"
+        return
+    fi
+    echo -e "${GREEN}All sites:${NC}"
+    for name in "${all_sites[@]}"; do
+        local status="disabled"
+        if [[ -L "$NGINX_ENABLED/${name}.conf" || -L "$NGINX_ENABLED/$name" ]]; then
+            status="enabled"
+        fi
+        local my=""
+        if is_my_site "$name"; then
+            my="${GREEN}[own]${NC}"
+        else
+            my="${YELLOW}[external]${NC}"
+        fi
+        local domain=""
+        if [[ -f "$NGINX_AVAILABLE/${name}.conf" ]]; then
+            domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/${name}.conf" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        elif [[ -f "$NGINX_AVAILABLE/$name" ]]; then
+            domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/$name" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        fi
+        [[ -z "$domain" ]] && domain="(domain not set)"
+        echo "  $name - $domain $my - $status"
+    done
+}
+
+toggle_site() {
+    local name="$1"
+    local config_conf="$NGINX_AVAILABLE/${name}.conf"
+    local config_noext="$NGINX_AVAILABLE/$name"
+    local link_conf="$NGINX_ENABLED/${name}.conf"
+    local link_noext="$NGINX_ENABLED/$name"
+
+    local config_file=""
+    if [[ -f "$config_conf" ]]; then
+        config_file="$config_conf"
+    elif [[ -f "$config_noext" ]]; then
+        config_file="$config_noext"
+    else
+        echo -e "${RED}Site $name not found${NC}"
+        return 1
+    fi
+
+    if ! is_my_site "$name"; then
+        echo -e "${YELLOW}Warning: site $name is not created by this script.${NC}"
+        echo -e "${YELLOW}Changing state may affect other services.${NC}"
+        read -p "Continue? (y/n): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo -e "${RED}Cancelled.${NC}"
+            return 1
+        fi
+    fi
+
+    if [[ -L "$link_conf" || -L "$link_noext" ]]; then
+        rm -f "$link_conf" "$link_noext"
+        echo -e "${GREEN}Site $name disabled${NC}"
+    else
+        ln -sf "$config_file" "$link_conf"
+        echo -e "${GREEN}Site $name enabled${NC}"
+    fi
+}
+
+reload_nginx() {
+    echo -e "\n${YELLOW}Checking nginx configuration...${NC}"
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx
+        echo -e "${GREEN}Nginx reloaded.${NC}"
+    else
+        echo -e "${RED}Configuration error. Nginx not reloaded.${NC}"
+        nginx -t
+    fi
+}
+
+create_site_wizard() {
+    echo -e "${GREEN}=== Create site ===${NC}"
+    read -p "Short name (no spaces): " name
+    [[ -z "$name" ]] && echo -e "${RED}Name cannot be empty${NC}" && press_any_key && return
+    site_exists "$name" && echo -e "${RED}Site with this name already exists${NC}" && press_any_key && return
+
+    read -p "Domain (example.com): " domain
+    [[ -z "$domain" ]] && echo -e "${RED}Domain is required${NC}" && press_any_key && return
+
+    echo "Type: 1) Static  2) Proxy"
+    read -p "Choose [1-2]: " type_choice
+    local type="static" port=""
+    if [[ "$type_choice" == "2" ]]; then
+        type="proxy"
+        read -p "Port for proxy (e.g., 3000): " port
+        [[ ! "$port" =~ ^[0-9]+$ ]] && echo -e "${RED}Port must be a number${NC}" && press_any_key && return
+    fi
+
+    local root_path="$WEB_ROOT/$name"
+    read -p "Root folder (default: $root_path): " custom_root
+    [[ -n "$custom_root" ]] && root_path="$custom_root"
+
+    create_config "$name" "$domain" "$root_path" "$type" "$port" && reload_nginx
+    press_any_key
+}
+
+delete_site_wizard() {
+    local all_sites=($(get_all_sites))
+    [[ ${#all_sites[@]} -eq 0 ]] && echo -e "${YELLOW}No sites to delete.${NC}" && press_any_key && return
+    echo -e "${GREEN}Available sites:${NC}"
+    for i in "${!all_sites[@]}"; do
+        local my=""
+        is_my_site "${all_sites[$i]}" && my=" (own)" || my=" (external)"
+        echo "$((i+1))) ${all_sites[$i]}$my"
+    done
+    read -p "Number to delete (0 - cancel): " num
+    if [[ "$num" =~ ^[0-9]+$ ]] && (( num > 0 && num <= ${#all_sites[@]} )); then
+        delete_site "${all_sites[$((num-1))]}" && reload_nginx
+    else
+        echo -e "${YELLOW}Cancelled.${NC}"
+    fi
+    press_any_key
+}
+
+toggle_site_wizard() {
+    local all_sites=($(get_all_sites))
+    [[ ${#all_sites[@]} -eq 0 ]] && echo -e "${YELLOW}No sites.${NC}" && press_any_key && return
+    echo -e "${GREEN}Available sites:${NC}"
+    for i in "${!all_sites[@]}"; do
+        local status=""
+        if [[ -L "$NGINX_ENABLED/${all_sites[$i]}.conf" || -L "$NGINX_ENABLED/${all_sites[$i]}" ]]; then
+            status=" (enabled)"
+        else
+            status=" (disabled)"
+        fi
+        local my=""
+        is_my_site "${all_sites[$i]}" && my=" (own)" || my=" (external)"
+        echo "$((i+1))) ${all_sites[$i]}$my$status"
+    done
+    read -p "Number to toggle: " num
+    if [[ "$num" =~ ^[0-9]+$ ]] && (( num > 0 && num <= ${#all_sites[@]} )); then
+        toggle_site "${all_sites[$((num-1))]}" && reload_nginx
+    else
+        echo -e "${YELLOW}Cancelled.${NC}"
+    fi
+    press_any_key
+}
+
+# ---- SSL (Certbot) ----
+ssl_interactive() {
+    echo -e "${GREEN}=== Running Certbot in interactive mode ===${NC}"
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot is not installed.${NC}"
+        return
+    fi
+    echo -e "${YELLOW}This will run 'certbot --nginx'.${NC}"
+    echo -e "You can select domains from the list and configure the certificate."
+    read -p "Continue? (y/n): " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        certbot --nginx
+        echo -e "${GREEN}Done.${NC}"
+        systemctl reload nginx 2>/dev/null
+    else
+        echo -e "${YELLOW}Cancelled.${NC}"
+    fi
+    press_any_key
+}
+
+ssl_get_cert() {
+    echo -e "${GREEN}=== Obtain SSL certificate ===${NC}"
+    read -p "Enter domain (e.g., example.com): " domain
+    if [[ -z "$domain" ]]; then
+        echo -e "${RED}Domain cannot be empty${NC}"
+        return
+    fi
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot is not installed. Please install it first via menu item 6.${NC}"
+        return
+    fi
+    read -p "Include www subdomain? (y/n, default y): " include_www
+    include_www=${include_www:-y}
+    local domains="-d $domain"
+    if [[ "$include_www" == "y" || "$include_www" == "Y" ]]; then
+        domains="$domains -d www.$domain"
+    fi
+    echo -e "${YELLOW}Running certbot for $domains ...${NC}"
+    if certbot --nginx $domains; then
+        echo -e "${GREEN}Certificate successfully obtained. Reloading nginx...${NC}"
+        systemctl reload nginx
+    else
+        echo -e "${RED}Error obtaining certificate. Check logs.${NC}"
+    fi
+    press_any_key
+}
+
+ssl_renew() {
+    echo -e "${GREEN}=== Renew all certificates ===${NC}"
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot is not installed.${NC}"
+        return
+    fi
+    certbot renew
+    echo -e "${GREEN}Renewal complete.${NC}"
+    press_any_key
+}
+
+ssl_list() {
+    echo -e "${GREEN}=== Existing certificates ===${NC}"
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot is not installed.${NC}"
+        return
+    fi
+    certbot certificates
+    press_any_key
+}
+
+ssl_menu() {
+    clear
+    echo "======================================"
+    echo "      SSL certificate management"
+    echo "======================================"
+    
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot is not installed.${NC}"
+        echo -e "${YELLOW}Would you like to install it now? (y/n)${NC}"
+        read -p "> " install_cert
+        if [[ "$install_cert" == "y" || "$install_cert" == "Y" ]]; then
+            apt update
+            apt install -y certbot python3-certbot-nginx
+            if command -v certbot &> /dev/null; then
+                echo -e "${GREEN}Certbot successfully installed.${NC}"
+            else
+                echo -e "${RED}Installation failed.${NC}"
+                press_any_key
+                return
+            fi
+        else
+            echo -e "${YELLOW}Without Certbot, SSL functions are unavailable.${NC}"
+            press_any_key
+            return
+        fi
+    fi
+
+    echo "1. Obtain certificate for domain (with www)"
+    echo "2. Renew all certificates"
+    echo "3. Show existing certificates"
+    echo "4. Run certbot --nginx (interactive mode)"
+    echo "0. Back"
+    echo "======================================"
+    read -p "Choose option: " choice
+    case $choice in
+        1) ssl_get_cert ;;
+        2) ssl_renew ;;
+        3) ssl_list ;;
+        4) ssl_interactive ;;
+        0) return ;;
+        *) echo -e "${RED}Invalid choice${NC}" ; press_any_key ;;
+    esac
+}
+
+press_any_key() {
+    read -p "Press Enter..."
+}
+
+# ----------------------------------------
+#  MAIN MENU
+# ----------------------------------------
+menu() {
+    clear
+    echo "======================================"
+    echo "      nginx site management"
+    echo "======================================"
+    echo "1. Create site"
+    echo "2. List all sites"
+    echo "3. Delete site"
+    echo "4. Enable/Disable site"
+    echo "5. Reload nginx"
+    echo "6. Install packages (PHP, MySQL, PostgreSQL, SQLite3, Certbot)"
+    echo "7. SSL certificates (Certbot)"
+    echo "8. Port management (UFW)"
+    echo "9. Configure Certbot hooks (ufw: open/close port 80)"
+    echo "10. Script info and removal"
+    echo "0. Exit"
+    echo "======================================"
+    read -p "Choose option [0-10]: " choice
+    case $choice in
+        1) create_site_wizard ;;
+        2) list_my_sites; press_any_key ;;
+        3) delete_site_wizard ;;
+        4) toggle_site_wizard ;;
+        5) reload_nginx; press_any_key ;;
+        6) check_packages ;;
+        7) ssl_menu ;;
+        8) manage_ufw ;;
+        9) configure_certbot_hooks ;;
+        10) about_and_remove ;;
+        0) echo -e "${GREEN}Goodbye!${NC}"; exit 0 ;;
+        *) echo -e "${RED}Invalid choice${NC}"; press_any_key ;;
+    esac
+}
+
+# ----------------------------------------
+#  START
+# ----------------------------------------
+init_list
+while true; do menu; done
