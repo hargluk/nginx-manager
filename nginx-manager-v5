@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- ВЕРСИЯ ---
-VERSION="5.1"
+VERSION="5.3"
 
 # --- ЦВЕТА ---
 if [ -t 1 ] && command -v tput &> /dev/null; then
@@ -244,7 +244,7 @@ check_packages() {
     read -p "Нажмите Enter..."
 }
 
-# ---- Управление UFW (без изменений) ----
+# ---- Управление UFW ----
 manage_ufw() {
     echo "======================================"
     echo "      Управление портами (UFW)"
@@ -339,7 +339,7 @@ manage_ufw() {
     done
 }
 
-# ---- Настройка Certbot hooks (без изменений) ----
+# ---- Настройка Certbot hooks (ufw порт 80) ----
 configure_certbot_hooks() {
     echo "======================================"
     echo "  Настройка Certbot hooks для ufw"
@@ -427,14 +427,13 @@ about_and_remove() {
     press_any_key
 }
 
-# ---- Функции для работы с сайтами (ИСПРАВЛЕНЫ) ----
+# ---- Функции для работы с сайтами (исправлены для работы с файлами без расширения) ----
 get_all_sites() {
     local sites=()
     if [[ -d "$NGINX_AVAILABLE" ]]; then
         for file in "$NGINX_AVAILABLE"/*; do
             [[ -f "$file" ]] || continue
             name=$(basename "$file")
-            # Удаляем расширение .conf, если оно есть, чтобы получить имя без расширения
             name="${name%.conf}"
             sites+=("$name")
         done
@@ -444,7 +443,6 @@ get_all_sites() {
 
 site_exists() {
     local name="$1"
-    # Проверяем наличие файла с .conf и без
     [[ -f "$NGINX_AVAILABLE/${name}.conf" || -f "$NGINX_AVAILABLE/$name" ]]
 }
 
@@ -513,7 +511,6 @@ EOF
 
 delete_site() {
     local name="$1"
-    # Проверяем существование любого из файлов
     local config_conf="$NGINX_AVAILABLE/${name}.conf"
     local config_noext="$NGINX_AVAILABLE/$name"
     if [[ ! -f "$config_conf" && ! -f "$config_noext" ]]; then
@@ -531,7 +528,6 @@ delete_site() {
         fi
     fi
 
-    # Удаляем оба возможных файла и симлинки
     rm -f "$NGINX_ENABLED/${name}.conf" "$NGINX_ENABLED/$name"
     rm -f "$config_conf" "$config_noext"
 
@@ -563,7 +559,6 @@ list_my_sites() {
         else
             my="${YELLOW}[внешний]${NC}"
         fi
-        # Пробуем прочитать домен из файла (с .conf или без)
         local domain=""
         if [[ -f "$NGINX_AVAILABLE/${name}.conf" ]]; then
             domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/${name}.conf" 2>/dev/null | awk '{print $2}' | sed 's/;//')
@@ -582,7 +577,6 @@ toggle_site() {
     local link_conf="$NGINX_ENABLED/${name}.conf"
     local link_noext="$NGINX_ENABLED/$name"
 
-    # Определяем существующий файл
     local config_file=""
     if [[ -f "$config_conf" ]]; then
         config_file="$config_conf"
@@ -603,12 +597,10 @@ toggle_site() {
         fi
     fi
 
-    # Проверяем наличие любой ссылки
     if [[ -L "$link_conf" || -L "$link_noext" ]]; then
         rm -f "$link_conf" "$link_noext"
         echo -e "${GREEN}Сайт $name отключён${NC}"
     else
-        # Создаём ссылку с именем .conf (для единообразия)
         ln -sf "$config_file" "$link_conf"
         echo -e "${GREEN}Сайт $name включён${NC}"
     fi
@@ -693,7 +685,26 @@ toggle_site_wizard() {
     press_any_key
 }
 
-# ---- SSL (Certbot) ----
+# ---- SSL (Certbot) с новой функцией интерактивного запуска и проверкой в меню ----
+ssl_interactive() {
+    echo -e "${GREEN}=== Запуск Certbot в интерактивном режиме ===${NC}"
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен.${NC}"
+        return
+    fi
+    echo -e "${YELLOW}Будет запущен certbot --nginx.${NC}"
+    echo -e "Вы сможете выбрать домены из списка и настроить сертификат."
+    read -p "Продолжить? (y/n): " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        certbot --nginx
+        echo -e "${GREEN}Завершено.${NC}"
+        systemctl reload nginx 2>/dev/null
+    else
+        echo -e "${YELLOW}Отмена.${NC}"
+    fi
+    press_any_key
+}
+
 ssl_get_cert() {
     echo -e "${GREEN}=== Получение SSL-сертификата ===${NC}"
     read -p "Введите домен (например, example.com): " domain
@@ -705,8 +716,14 @@ ssl_get_cert() {
         echo -e "${RED}Certbot не установлен. Сначала установите его через пункт 6.${NC}"
         return
     fi
-    echo -e "${YELLOW}Запуск certbot для $domain ...${NC}"
-    if certbot --nginx -d "$domain" -d "www.$domain"; then
+    read -p "Включить поддомен www? (y/n, по умолчанию y): " include_www
+    include_www=${include_www:-y}
+    local domains="-d $domain"
+    if [[ "$include_www" == "y" || "$include_www" == "Y" ]]; then
+        domains="$domains -d www.$domain"
+    fi
+    echo -e "${YELLOW}Запуск certbot для $domains ...${NC}"
+    if certbot --nginx $domains; then
         echo -e "${GREEN}Сертификат успешно получен. Перезагружаем Nginx...${NC}"
         systemctl reload nginx
     else
@@ -741,9 +758,33 @@ ssl_menu() {
     echo "======================================"
     echo "      Управление SSL сертификатами"
     echo "======================================"
-    echo "1. Получить сертификат для домена"
+    
+    # Проверка установки certbot
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен.${NC}"
+        echo -e "${YELLOW}Хотите установить его сейчас? (y/n)${NC}"
+        read -p "> " install_cert
+        if [[ "$install_cert" == "y" || "$install_cert" == "Y" ]]; then
+            apt update
+            apt install -y certbot python3-certbot-nginx
+            if command -v certbot &> /dev/null; then
+                echo -e "${GREEN}Certbot успешно установлен.${NC}"
+            else
+                echo -e "${RED}Ошибка установки.${NC}"
+                press_any_key
+                return
+            fi
+        else
+            echo -e "${YELLOW}Без Certbot SSL-функции недоступны.${NC}"
+            press_any_key
+            return
+        fi
+    fi
+
+    echo "1. Получить сертификат для домена (с www)"
     echo "2. Обновить все сертификаты"
     echo "3. Показать существующие сертификаты"
+    echo "4. Запустить certbot --nginx (интерактивный режим)"
     echo "0. Назад"
     echo "======================================"
     read -p "Выберите пункт: " choice
@@ -751,6 +792,7 @@ ssl_menu() {
         1) ssl_get_cert ;;
         2) ssl_renew ;;
         3) ssl_list ;;
+        4) ssl_interactive ;;
         0) return ;;
         *) echo -e "${RED}Неверный выбор${NC}" ; press_any_key ;;
     esac
