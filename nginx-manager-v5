@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # --- ВЕРСИЯ ---
-VERSION="5.0"
+VERSION="5.1"
 
-# --- ЦВЕТА (через tput для надёжности) ---
+# --- ЦВЕТА ---
 if [ -t 1 ] && command -v tput &> /dev/null; then
     RED=$(tput setaf 1)
     GREEN=$(tput setaf 2)
@@ -16,10 +16,10 @@ fi
 TARGET="/usr/local/bin/nginx-manager"
 
 # ----------------------------------------
-#  САМОУСТАНОВКА (если запущено не из TARGET)
+#  САМОУСТАНОВКА
 # ----------------------------------------
 if [[ "$0" != "$TARGET" && "$0" != *"/nginx-manager" ]]; then
-    echo -e "${YELLOW}Этот скрипт (версия $VERSION) может установить себя в $TARGET для удобного вызова.${NC}"
+    echo -e "${YELLOW}Этот скрипт (версия $VERSION) может установить себя в $TARGET.${NC}"
     read -p "Установить (скопировать) себя в $TARGET ? (y/n): " ans
     if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
         if [[ $EUID -ne 0 ]]; then
@@ -45,7 +45,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# 1. Проверка и установка nginx
+# Проверка nginx
 echo -e "${YELLOW}Проверка наличия nginx...${NC}"
 if ! command -v nginx &> /dev/null; then
     echo -e "${YELLOW}Nginx не найден. Установить? (y/n)${NC}"
@@ -64,7 +64,7 @@ else
     echo -e "${GREEN}Nginx уже установлен.${NC}"
 fi
 
-# 2. Создание необходимых папок и файла списка
+# Создание папок и файла списка
 mkdir -p /etc/nginx/sites-available
 mkdir -p /etc/nginx/sites-enabled
 touch /etc/nginx/.my_sites
@@ -107,7 +107,7 @@ get_version() {
     esac
 }
 
-# ---- Управление пакетами (с версиями, установкой и удалением) ----
+# ---- Управление пакетами (без изменений) ----
 check_packages() {
     echo "======================================"
     echo "     Выбор пакетов для установки"
@@ -140,7 +140,6 @@ check_packages() {
     }
 
     show_status
-
     read -p "Введите номера через пробел (установка/удаление), или 9, или 0: " choices
 
     if [[ "$choices" == "0" ]]; then
@@ -245,7 +244,7 @@ check_packages() {
     read -p "Нажмите Enter..."
 }
 
-# ---- Управление UFW (портами) ----
+# ---- Управление UFW (без изменений) ----
 manage_ufw() {
     echo "======================================"
     echo "      Управление портами (UFW)"
@@ -340,7 +339,7 @@ manage_ufw() {
     done
 }
 
-# ---- Настройка Certbot hooks (ufw порт 80) ----
+# ---- Настройка Certbot hooks (без изменений) ----
 configure_certbot_hooks() {
     echo "======================================"
     echo "  Настройка Certbot hooks для ufw"
@@ -398,7 +397,7 @@ configure_certbot_hooks() {
     read -p "Нажмите Enter..."
 }
 
-# ---- Информация о скрипте и его удаление ----
+# ---- Информация о скрипте и удаление ----
 about_and_remove() {
     clear
     echo "======================================"
@@ -428,13 +427,15 @@ about_and_remove() {
     press_any_key
 }
 
-# ---- Функции для работы с сайтами ----
+# ---- Функции для работы с сайтами (ИСПРАВЛЕНЫ) ----
 get_all_sites() {
     local sites=()
     if [[ -d "$NGINX_AVAILABLE" ]]; then
-        for file in "$NGINX_AVAILABLE"/*.conf; do
+        for file in "$NGINX_AVAILABLE"/*; do
             [[ -f "$file" ]] || continue
-            name=$(basename "$file" .conf)
+            name=$(basename "$file")
+            # Удаляем расширение .conf, если оно есть, чтобы получить имя без расширения
+            name="${name%.conf}"
             sites+=("$name")
         done
     fi
@@ -442,7 +443,9 @@ get_all_sites() {
 }
 
 site_exists() {
-    [[ -f "$NGINX_AVAILABLE/${1}.conf" ]]
+    local name="$1"
+    # Проверяем наличие файла с .conf и без
+    [[ -f "$NGINX_AVAILABLE/${name}.conf" || -f "$NGINX_AVAILABLE/$name" ]]
 }
 
 add_to_list() {
@@ -510,7 +513,10 @@ EOF
 
 delete_site() {
     local name="$1"
-    if ! site_exists "$name"; then
+    # Проверяем существование любого из файлов
+    local config_conf="$NGINX_AVAILABLE/${name}.conf"
+    local config_noext="$NGINX_AVAILABLE/$name"
+    if [[ ! -f "$config_conf" && ! -f "$config_noext" ]]; then
         echo -e "${RED}Сайт $name не найден${NC}"
         return 1
     fi
@@ -525,7 +531,9 @@ delete_site() {
         fi
     fi
 
-    rm -f "$NGINX_ENABLED/${name}.conf" "$NGINX_AVAILABLE/${name}.conf"
+    # Удаляем оба возможных файла и симлинки
+    rm -f "$NGINX_ENABLED/${name}.conf" "$NGINX_ENABLED/$name"
+    rm -f "$config_conf" "$config_noext"
 
     local root_path="$WEB_ROOT/$name"
     if [[ -d "$root_path" ]]; then
@@ -546,14 +554,22 @@ list_my_sites() {
     echo -e "${GREEN}Все сайты:${NC}"
     for name in "${all_sites[@]}"; do
         local status="выключен"
-        [[ -L "$NGINX_ENABLED/${name}.conf" ]] && status="включён"
+        if [[ -L "$NGINX_ENABLED/${name}.conf" || -L "$NGINX_ENABLED/$name" ]]; then
+            status="включён"
+        fi
         local my=""
         if is_my_site "$name"; then
             my="${GREEN}[свой]${NC}"
         else
             my="${YELLOW}[внешний]${NC}"
         fi
-        local domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/${name}.conf" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        # Пробуем прочитать домен из файла (с .conf или без)
+        local domain=""
+        if [[ -f "$NGINX_AVAILABLE/${name}.conf" ]]; then
+            domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/${name}.conf" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        elif [[ -f "$NGINX_AVAILABLE/$name" ]]; then
+            domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/$name" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        fi
         [[ -z "$domain" ]] && domain="(домен не указан)"
         echo "  $name - $domain $my - $status"
     done
@@ -561,9 +577,18 @@ list_my_sites() {
 
 toggle_site() {
     local name="$1"
-    local config="$NGINX_AVAILABLE/${name}.conf"
-    local link="$NGINX_ENABLED/${name}.conf"
-    if ! site_exists "$name"; then
+    local config_conf="$NGINX_AVAILABLE/${name}.conf"
+    local config_noext="$NGINX_AVAILABLE/$name"
+    local link_conf="$NGINX_ENABLED/${name}.conf"
+    local link_noext="$NGINX_ENABLED/$name"
+
+    # Определяем существующий файл
+    local config_file=""
+    if [[ -f "$config_conf" ]]; then
+        config_file="$config_conf"
+    elif [[ -f "$config_noext" ]]; then
+        config_file="$config_noext"
+    else
         echo -e "${RED}Сайт $name не найден${NC}"
         return 1
     fi
@@ -578,11 +603,13 @@ toggle_site() {
         fi
     fi
 
-    if [[ -L "$link" ]]; then
-        rm -f "$link"
+    # Проверяем наличие любой ссылки
+    if [[ -L "$link_conf" || -L "$link_noext" ]]; then
+        rm -f "$link_conf" "$link_noext"
         echo -e "${GREEN}Сайт $name отключён${NC}"
     else
-        ln -sf "$config" "$link"
+        # Создаём ссылку с именем .conf (для единообразия)
+        ln -sf "$config_file" "$link_conf"
         echo -e "${GREEN}Сайт $name включён${NC}"
     fi
 }
@@ -648,7 +675,11 @@ toggle_site_wizard() {
     echo -e "${GREEN}Доступные сайты:${NC}"
     for i in "${!all_sites[@]}"; do
         local status=""
-        [[ -L "$NGINX_ENABLED/${all_sites[$i]}.conf" ]] && status=" (включён)" || status=" (выключен)"
+        if [[ -L "$NGINX_ENABLED/${all_sites[$i]}.conf" || -L "$NGINX_ENABLED/${all_sites[$i]}" ]]; then
+            status=" (включён)"
+        else
+            status=" (выключен)"
+        fi
         local my=""
         is_my_site "${all_sites[$i]}" && my=" (свой)" || my=" (внешний)"
         echo "$((i+1))) ${all_sites[$i]}$my$status"
@@ -730,7 +761,7 @@ press_any_key() {
 }
 
 # ----------------------------------------
-#  ГЛАВНОЕ МЕНЮ (добавлен пункт 10)
+#  ГЛАВНОЕ МЕНЮ
 # ----------------------------------------
 menu() {
     clear
