@@ -1,7 +1,10 @@
 #!/bin/bash
 
+# --- ВЕРСИЯ ---
+VERSION="5.3"
+
 # --- ЦВЕТА ---
-if [ -t 1 ]; then
+if [ -t 1 ] && command -v tput &> /dev/null; then
     RED=$(tput setaf 1)
     GREEN=$(tput setaf 2)
     YELLOW=$(tput setaf 3)
@@ -13,10 +16,10 @@ fi
 TARGET="/usr/local/bin/nginx-manager"
 
 # ----------------------------------------
-#  САМОУСТАНОВКА (если запущено не из TARGET)
+#  САМОУСТАНОВКА
 # ----------------------------------------
 if [[ "$0" != "$TARGET" && "$0" != *"/nginx-manager" ]]; then
-    echo -e "${YELLOW}Этот скрипт может установить себя в $TARGET для удобного вызова.${NC}"
+    echo -e "${YELLOW}Этот скрипт (версия $VERSION) может установить себя в $TARGET.${NC}"
     read -p "Установить (скопировать) себя в $TARGET ? (y/n): " ans
     if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
         if [[ $EUID -ne 0 ]]; then
@@ -25,7 +28,7 @@ if [[ "$0" != "$TARGET" && "$0" != *"/nginx-manager" ]]; then
         fi
         cp "$0" "$TARGET"
         chmod +x "$TARGET"
-        echo -e "${GREEN}Скрипт установлен как $TARGET${NC}"
+        echo -e "${GREEN}Скрипт v$VERSION установлен как $TARGET${NC}"
         echo -e "Теперь вы можете запускать его командой: ${YELLOW}sudo nginx-manager${NC}"
         exec "$TARGET"
     else
@@ -42,7 +45,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# 1. Проверка и установка nginx
+# Проверка nginx
 echo -e "${YELLOW}Проверка наличия nginx...${NC}"
 if ! command -v nginx &> /dev/null; then
     echo -e "${YELLOW}Nginx не найден. Установить? (y/n)${NC}"
@@ -61,7 +64,7 @@ else
     echo -e "${GREEN}Nginx уже установлен.${NC}"
 fi
 
-# 2. Создание необходимых папок и файла списка
+# Создание папок и файла списка
 mkdir -p /etc/nginx/sites-available
 mkdir -p /etc/nginx/sites-enabled
 touch /etc/nginx/.my_sites
@@ -79,44 +82,71 @@ init_list() {
     touch "$LIST_FILE"
 }
 
+# ---- Получение версий пакетов ----
+get_version() {
+    local pkg="$1"
+    case "$pkg" in
+        php)
+            php -v 2>/dev/null | head -1 | awk '{print $2}' | cut -d'-' -f1
+            ;;
+        mysql-server)
+            mysql --version 2>/dev/null | awk '{print $5}' | tr -d ','
+            ;;
+        postgresql)
+            psql --version 2>/dev/null | awk '{print $3}'
+            ;;
+        sqlite3)
+            sqlite3 --version 2>/dev/null | awk '{print $1}'
+            ;;
+        certbot)
+            certbot --version 2>/dev/null | awk '{print $2}'
+            ;;
+        *)
+            echo "?"
+            ;;
+    esac
+}
+
+# ---- Управление пакетами (без изменений) ----
 check_packages() {
     echo "======================================"
     echo "     Выбор пакетов для установки"
     echo "======================================"
 
-    local php_installed=0
-    local mysql_installed=0
-    local postgres_installed=0
-    local sqlite_installed=0
-    local certbot_installed=0
+    show_status() {
+        command -v php &> /dev/null && php_installed=1 || php_installed=0
+        command -v mysql &> /dev/null && mysql_installed=1 || mysql_installed=0
+        command -v psql &> /dev/null && postgres_installed=1 || postgres_installed=0
+        command -v sqlite3 &> /dev/null && sqlite_installed=1 || sqlite_installed=0
+        command -v certbot &> /dev/null && certbot_installed=1 || certbot_installed=0
 
-    command -v php &> /dev/null && php_installed=1
-    command -v mysql &> /dev/null && mysql_installed=1
-    command -v psql &> /dev/null && postgres_installed=1
-    command -v sqlite3 &> /dev/null && sqlite_installed=1
-    command -v certbot &> /dev/null && certbot_installed=1
+        packages=("php" "mysql-server" "postgresql" "sqlite3" "certbot")
+        names=("PHP (php-fpm, модули)" "MySQL" "PostgreSQL" "SQLite3" "Certbot + Nginx плагин")
+        statuses=($php_installed $mysql_installed $postgres_installed $sqlite_installed $certbot_installed)
 
-    local packages=()
-    local names=()
-    local statuses=()
+        echo "Текущий статус:"
+        for i in "${!packages[@]}"; do
+            if [[ ${statuses[$i]} -eq 1 ]]; then
+                local ver=$(get_version "${packages[$i]}")
+                local status_text="${GREEN}установлен (версия: $ver)${NC}"
+            else
+                local status_text="${RED}не установлен${NC}"
+            fi
+            echo "$((i+1)). ${names[$i]} : $status_text"
+        done
+        echo "9. Установить все недостающие пакеты"
+        echo "0. Выход"
+        echo ""
+    }
 
-    packages+=("php")                         ; names+=("PHP (php-fpm, модули)")       ; statuses+=($php_installed)
-    packages+=("mysql-server")                ; names+=("MySQL")                       ; statuses+=($mysql_installed)
-    packages+=("postgresql")                  ; names+=("PostgreSQL")                  ; statuses+=($postgres_installed)
-    packages+=("sqlite3")                     ; names+=("SQLite3")                     ; statuses+=($sqlite_installed)
-    packages+=("certbot")                     ; names+=("Certbot + Nginx плагин")      ; statuses+=($certbot_installed)
-
-    echo "Текущий статус:"
-    for i in "${!packages[@]}"; do
-        local status_text="${RED}не установлен${NC}"
-        [[ ${statuses[$i]} -eq 1 ]] && status_text="${GREEN}установлен${NC}"
-        echo "$((i+1)). ${names[$i]} : $status_text"
-    done
-    echo "0. Установить всё (только недостающее)"
-    echo ""
-    read -p "Введите номера через пробел для установки (например: 1 3 5) или 0: " choices
+    show_status
+    read -p "Введите номера через пробел (установка/удаление), или 9, или 0: " choices
 
     if [[ "$choices" == "0" ]]; then
+        return
+    fi
+
+    if [[ "$choices" == "9" ]]; then
         local to_install=()
         for i in "${!packages[@]}"; do
             if [[ ${statuses[$i]} -eq 0 ]]; then
@@ -130,8 +160,7 @@ check_packages() {
             apt update
             for pkg in "${to_install[@]}"; do
                 if [[ "$pkg" == "certbot" ]]; then
-                    apt install -y certbot
-                    apt install -y python3-certbot-nginx
+                    apt install -y certbot python3-certbot-nginx
                 else
                     apt install -y "$pkg"
                 fi
@@ -142,45 +171,279 @@ check_packages() {
             systemctl enable mysql 2>/dev/null; systemctl start mysql 2>/dev/null
             systemctl enable postgresql 2>/dev/null; systemctl start postgresql 2>/dev/null
             echo -e "${GREEN}Установка завершена.${NC}"
+            if [[ " ${to_install[*]} " =~ " certbot " ]]; then
+                echo -e "${YELLOW}Certbot установлен. Запустить получение сертификата? (y/n)${NC}"
+                read -p "> " run_cert
+                [[ "$run_cert" == "y" || "$run_cert" == "Y" ]] && ssl_get_cert
+            fi
         fi
-    else
-        local selected=()
-        for num in $choices; do
-            if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#packages[@]} )); then
-                local idx=$((num-1))
-                if [[ ${statuses[$idx]} -eq 0 ]]; then
-                    selected+=("${packages[$idx]}")
+        show_status
+        read -p "Нажмите Enter..."
+        return
+    fi
+
+    local to_install=()
+    local to_remove=()
+    for num in $choices; do
+        if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#packages[@]} )); then
+            local idx=$((num-1))
+            local pkg="${packages[$idx]}"
+            if [[ ${statuses[$idx]} -eq 0 ]]; then
+                to_install+=("$pkg")
+            else
+                echo -n "${names[$idx]} уже установлен. Удалить? (y/n): "
+                read ans
+                if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+                    to_remove+=("$pkg")
                 else
-                    echo -e "${YELLOW}${names[$idx]} уже установлен, пропускаем.${NC}"
+                    echo -e "${YELLOW}Пропускаем.${NC}"
                 fi
+            fi
+        else
+            echo -e "${RED}Неверный номер: $num (пропускаем)${NC}"
+        fi
+    done
+
+    if [[ ${#to_install[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Устанавливаем: ${to_install[*]}${NC}"
+        apt update
+        for pkg in "${to_install[@]}"; do
+            if [[ "$pkg" == "certbot" ]]; then
+                apt install -y certbot python3-certbot-nginx
+            else
+                apt install -y "$pkg"
             fi
         done
-        if [[ ${#selected[@]} -eq 0 ]]; then
-            echo -e "${YELLOW}Ничего не выбрано (или всё уже установлено).${NC}"
-        else
-            echo -e "${YELLOW}Устанавливаем: ${selected[*]}${NC}"
-            apt update
-            for pkg in "${selected[@]}"; do
-                if [[ "$pkg" == "certbot" ]]; then
-                    apt install -y certbot
-                    apt install -y python3-certbot-nginx
-                else
-                    apt install -y "$pkg"
-                fi
-            done
-            if [[ " ${selected[*]} " =~ " php " ]]; then
-                apt install -y php-fpm php-mysql php-pgsql php-sqlite3
-            fi
-            [[ " ${selected[*]} " =~ " mysql-server " ]] && { systemctl enable mysql; systemctl start mysql; }
-            [[ " ${selected[*]} " =~ " postgresql " ]] && { systemctl enable postgresql; systemctl start postgresql; }
-            echo -e "${GREEN}Установка выбранных пакетов завершена.${NC}"
+        if [[ " ${to_install[*]} " =~ " php " ]]; then
+            apt install -y php-fpm php-mysql php-pgsql php-sqlite3
+        fi
+        [[ " ${to_install[*]} " =~ " mysql-server " ]] && { systemctl enable mysql; systemctl start mysql; }
+        [[ " ${to_install[*]} " =~ " postgresql " ]] && { systemctl enable postgresql; systemctl start postgresql; }
+        echo -e "${GREEN}Установка выбранных пакетов завершена.${NC}"
+        if [[ " ${to_install[*]} " =~ " certbot " ]]; then
+            echo -e "${YELLOW}Certbot установлен. Запустить получение сертификата? (y/n)${NC}"
+            read -p "> " run_cert
+            [[ "$run_cert" == "y" || "$run_cert" == "Y" ]] && ssl_get_cert
         fi
     fi
+
+    if [[ ${#to_remove[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Удаляем: ${to_remove[*]}${NC}"
+        for pkg in "${to_remove[@]}"; do
+            if [[ "$pkg" == "php" ]]; then
+                apt remove --purge -y php-fpm php-mysql php-pgsql php-sqlite3 2>/dev/null
+                apt remove --purge -y php 2>/dev/null
+            else
+                apt remove --purge -y "$pkg"
+            fi
+        done
+        echo -e "${GREEN}Удаление завершено.${NC}"
+    fi
+
+    show_status
     read -p "Нажмите Enter..."
 }
 
+# ---- Управление UFW ----
+manage_ufw() {
+    echo "======================================"
+    echo "      Управление портами (UFW)"
+    echo "======================================"
+    
+    if ! command -v ufw &> /dev/null; then
+        echo -e "${YELLOW}UFW не найден. Установить? (y/n)${NC}"
+        read -p "> " install_ufw
+        if [[ "$install_ufw" == "y" || "$install_ufw" == "Y" ]]; then
+            apt update
+            apt install -y ufw
+            echo -e "${GREEN}UFW установлен.${NC}"
+            ufw allow 22/tcp
+            echo -e "${GREEN}Порт 22 (SSH) открыт.${NC}"
+            read -p "Включить ufw сейчас? (y/n): " enable_ufw
+            if [[ "$enable_ufw" == "y" || "$enable_ufw" == "Y" ]]; then
+                ufw --force enable
+                echo -e "${GREEN}UFW включён.${NC}"
+            else
+                echo -e "${YELLOW}UFW не включён. Вы можете включить позже.${NC}"
+            fi
+        else
+            echo -e "${RED}UFW не установлен. Невозможно управлять портами.${NC}"
+            read -p "Нажмите Enter..."
+            return
+        fi
+    fi
+
+    while true; do
+        echo ""
+        echo "1. Показать статус и правила"
+        echo "2. Открыть порт (например, 80, 443, 3000)"
+        echo "3. Закрыть порт (удалить правило)"
+        echo "4. Включить UFW"
+        echo "5. Выключить UFW"
+        echo "6. Назад"
+        read -p "Выберите действие [1-6]: " act
+        case $act in
+            1)
+                ufw status verbose
+                read -p "Нажмите Enter..."
+                ;;
+            2)
+                read -p "Введите номер порта: " port
+                if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+                    echo -e "${RED}Неверный порт.${NC}"
+                    continue
+                fi
+                read -p "Протокол (tcp/udp, по умолчанию tcp): " proto
+                [[ -z "$proto" ]] && proto="tcp"
+                if [[ "$proto" != "tcp" && "$proto" != "udp" ]]; then
+                    echo -e "${RED}Неверный протокол.${NC}"
+                    continue
+                fi
+                ufw allow "$port"/"$proto"
+                echo -e "${GREEN}Порт $port/$proto открыт.${NC}"
+                read -p "Нажмите Enter..."
+                ;;
+            3)
+                read -p "Введите номер порта для закрытия: " port
+                if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+                    echo -e "${RED}Неверный порт.${NC}"
+                    continue
+                fi
+                read -p "Протокол (tcp/udp, по умолчанию tcp): " proto
+                [[ -z "$proto" ]] && proto="tcp"
+                if [[ "$proto" != "tcp" && "$proto" != "udp" ]]; then
+                    echo -e "${RED}Неверный протокол.${NC}"
+                    continue
+                fi
+                ufw delete allow "$port"/"$proto"
+                echo -e "${GREEN}Правило для порта $port/$proto удалено.${NC}"
+                read -p "Нажмите Enter..."
+                ;;
+            4)
+                ufw --force enable
+                echo -e "${GREEN}UFW включён.${NC}"
+                read -p "Нажмите Enter..."
+                ;;
+            5)
+                ufw disable
+                echo -e "${YELLOW}UFW выключен.${NC}"
+                read -p "Нажмите Enter..."
+                ;;
+            6)
+                break
+                ;;
+            *)
+                echo -e "${RED}Неверный выбор${NC}"
+                ;;
+        esac
+    done
+}
+
+# ---- Настройка Certbot hooks (ufw порт 80) ----
+configure_certbot_hooks() {
+    echo "======================================"
+    echo "  Настройка Certbot hooks для ufw"
+    echo "======================================"
+    
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен. Сначала установите его через пункт 6.${NC}"
+        read -p "Нажмите Enter..."
+        return
+    fi
+    
+    if ! command -v ufw &> /dev/null; then
+        echo -e "${YELLOW}UFW не найден. Установить? (y/n)${NC}"
+        read -p "> " install_ufw
+        if [[ "$install_ufw" == "y" || "$install_ufw" == "Y" ]]; then
+            apt update
+            apt install -y ufw
+            echo -e "${GREEN}UFW установлен.${NC}"
+            ufw allow 22/tcp
+            echo -e "${GREEN}Порт 22 (SSH) открыт.${NC}"
+            read -p "Включить ufw сейчас? (y/n): " enable_ufw
+            if [[ "$enable_ufw" == "y" || "$enable_ufw" == "Y" ]]; then
+                ufw --force enable
+                echo -e "${GREEN}UFW включён.${NC}"
+            fi
+        else
+            echo -e "${RED}Без ufw настройка hooks невозможна.${NC}"
+            read -p "Нажмите Enter..."
+            return
+        fi
+    else
+        if ! ufw status | grep -q "22/tcp.*ALLOW"; then
+            echo -e "${YELLOW}Порт 22 (SSH) не открыт. Открыть? (y/n)${NC}"
+            read -p "> " open_ssh
+            if [[ "$open_ssh" == "y" || "$open_ssh" == "Y" ]]; then
+                ufw allow 22/tcp
+                echo -e "${GREEN}Порт 22 открыт.${NC}"
+            fi
+        fi
+    fi
+    
+    CLI_INI="/etc/letsencrypt/cli.ini"
+    mkdir -p /etc/letsencrypt
+    
+    if [[ -f "$CLI_INI" ]]; then
+        sed -i '/^pre-hook = /d' "$CLI_INI"
+        sed -i '/^post-hook = /d' "$CLI_INI"
+    fi
+    
+    echo "pre-hook = ufw allow 80/tcp" >> "$CLI_INI"
+    echo "post-hook = ufw delete allow 80/tcp" >> "$CLI_INI"
+    
+    echo -e "${GREEN}Файл $CLI_INI обновлён.${NC}"
+    echo -e "Certbot будет автоматически открывать порт 80 и закрывать."
+    read -p "Нажмите Enter..."
+}
+
+# ---- Информация о скрипте и удаление ----
+about_and_remove() {
+    clear
+    echo "======================================"
+    echo "      О скрипте и удаление"
+    echo "======================================"
+    echo -e "${GREEN}Название:${NC} nginx-manager"
+    echo -e "${GREEN}Версия:${NC}  $VERSION"
+    echo -e "${GREEN}Путь:${NC}    $TARGET"
+    echo -e "${GREEN}Автор:${NC}   hargluk"
+    echo ""
+    echo -e "${YELLOW}Если вы хотите полностью удалить этот скрипт,${NC}"
+    echo -e "${YELLOW}выполните следующую команду (вручную):${NC}"
+    echo -e "  ${GREEN}sudo rm $TARGET${NC}"
+    echo ""
+    read -p "Удалить скрипт сейчас? (y/n): " remove_now
+    if [[ "$remove_now" == "y" || "$remove_now" == "Y" ]]; then
+        if [[ -f "$TARGET" ]]; then
+            rm -f "$TARGET"
+            echo -e "${GREEN}Скрипт удалён.${NC}"
+            echo -e "Для выхода нажмите Enter."
+            read -p ""
+            exit 0
+        else
+            echo -e "${RED}Файл $TARGET не найден.${NC}"
+        fi
+    fi
+    press_any_key
+}
+
+# ---- Функции для работы с сайтами (исправлены для работы с файлами без расширения) ----
+get_all_sites() {
+    local sites=()
+    if [[ -d "$NGINX_AVAILABLE" ]]; then
+        for file in "$NGINX_AVAILABLE"/*; do
+            [[ -f "$file" ]] || continue
+            name=$(basename "$file")
+            name="${name%.conf}"
+            sites+=("$name")
+        done
+    fi
+    echo "${sites[@]}"
+}
+
 site_exists() {
-    [[ -f "$NGINX_AVAILABLE/${1}.conf" ]]
+    local name="$1"
+    [[ -f "$NGINX_AVAILABLE/${name}.conf" || -f "$NGINX_AVAILABLE/$name" ]]
 }
 
 add_to_list() {
@@ -189,10 +452,6 @@ add_to_list() {
 
 remove_from_list() {
     sed -i "/^$1$/d" "$LIST_FILE"
-}
-
-get_my_sites() {
-    [[ -f "$LIST_FILE" ]] && cat "$LIST_FILE"
 }
 
 is_my_site() {
@@ -252,16 +511,25 @@ EOF
 
 delete_site() {
     local name="$1"
-    if ! site_exists "$name"; then
+    local config_conf="$NGINX_AVAILABLE/${name}.conf"
+    local config_noext="$NGINX_AVAILABLE/$name"
+    if [[ ! -f "$config_conf" && ! -f "$config_noext" ]]; then
         echo -e "${RED}Сайт $name не найден${NC}"
         return 1
     fi
+
     if ! is_my_site "$name"; then
-        echo -e "${RED}Удалять можно только свои сайты.${NC}"
-        return 1
+        echo -e "${YELLOW}Внимание: сайт $name не является созданным скриптом.${NC}"
+        echo -e "${YELLOW}Удаление может повлиять на другие сервисы.${NC}"
+        read -p "Удалить сайт $name? (y/n): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo -e "${RED}Отмена.${NC}"
+            return 1
+        fi
     fi
 
-    rm -f "$NGINX_ENABLED/${name}.conf" "$NGINX_AVAILABLE/${name}.conf"
+    rm -f "$NGINX_ENABLED/${name}.conf" "$NGINX_ENABLED/$name"
+    rm -f "$config_conf" "$config_noext"
 
     local root_path="$WEB_ROOT/$name"
     if [[ -d "$root_path" ]]; then
@@ -274,33 +542,66 @@ delete_site() {
 }
 
 list_my_sites() {
-    local sites=($(get_my_sites))
-    if [[ ${#sites[@]} -eq 0 ]]; then
-        echo -e "${YELLOW}Нет созданных сайтов.${NC}"
+    local all_sites=($(get_all_sites))
+    if [[ ${#all_sites[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}Нет ни одного сайта (конфигов) в $NGINX_AVAILABLE.${NC}"
         return
     fi
-    echo -e "${GREEN}Мои сайты:${NC}"
-    for name in "${sites[@]}"; do
+    echo -e "${GREEN}Все сайты:${NC}"
+    for name in "${all_sites[@]}"; do
         local status="выключен"
-        [[ -L "$NGINX_ENABLED/${name}.conf" ]] && status="включён"
-        local domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/${name}.conf" 2>/dev/null | awk '{print $2}' | sed 's/;//')
-        echo "  $name ($domain) - $status"
+        if [[ -L "$NGINX_ENABLED/${name}.conf" || -L "$NGINX_ENABLED/$name" ]]; then
+            status="включён"
+        fi
+        local my=""
+        if is_my_site "$name"; then
+            my="${GREEN}[свой]${NC}"
+        else
+            my="${YELLOW}[внешний]${NC}"
+        fi
+        local domain=""
+        if [[ -f "$NGINX_AVAILABLE/${name}.conf" ]]; then
+            domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/${name}.conf" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        elif [[ -f "$NGINX_AVAILABLE/$name" ]]; then
+            domain=$(grep -m1 'server_name' "$NGINX_AVAILABLE/$name" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        fi
+        [[ -z "$domain" ]] && domain="(домен не указан)"
+        echo "  $name - $domain $my - $status"
     done
 }
 
 toggle_site() {
     local name="$1"
-    local config="$NGINX_AVAILABLE/${name}.conf"
-    local link="$NGINX_ENABLED/${name}.conf"
-    if ! site_exists "$name"; then
+    local config_conf="$NGINX_AVAILABLE/${name}.conf"
+    local config_noext="$NGINX_AVAILABLE/$name"
+    local link_conf="$NGINX_ENABLED/${name}.conf"
+    local link_noext="$NGINX_ENABLED/$name"
+
+    local config_file=""
+    if [[ -f "$config_conf" ]]; then
+        config_file="$config_conf"
+    elif [[ -f "$config_noext" ]]; then
+        config_file="$config_noext"
+    else
         echo -e "${RED}Сайт $name не найден${NC}"
         return 1
     fi
-    if [[ -L "$link" ]]; then
-        rm -f "$link"
+
+    if ! is_my_site "$name"; then
+        echo -e "${YELLOW}Внимание: сайт $name не является созданным скриптом.${NC}"
+        echo -e "${YELLOW}Изменение состояния может повлиять на другие сервисы.${NC}"
+        read -p "Продолжить? (y/n): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo -e "${RED}Отмена.${NC}"
+            return 1
+        fi
+    fi
+
+    if [[ -L "$link_conf" || -L "$link_noext" ]]; then
+        rm -f "$link_conf" "$link_noext"
         echo -e "${GREEN}Сайт $name отключён${NC}"
     else
-        ln -sf "$config" "$link"
+        ln -sf "$config_file" "$link_conf"
         echo -e "${GREEN}Сайт $name включён${NC}"
     fi
 }
@@ -343,13 +644,17 @@ create_site_wizard() {
 }
 
 delete_site_wizard() {
-    local sites=($(get_my_sites))
-    [[ ${#sites[@]} -eq 0 ]] && echo -e "${YELLOW}Нет сайтов для удаления.${NC}" && press_any_key && return
-    echo -e "${GREEN}Ваши сайты:${NC}"
-    for i in "${!sites[@]}"; do echo "$((i+1))) ${sites[$i]}"; done
+    local all_sites=($(get_all_sites))
+    [[ ${#all_sites[@]} -eq 0 ]] && echo -e "${YELLOW}Нет сайтов для удаления.${NC}" && press_any_key && return
+    echo -e "${GREEN}Доступные сайты:${NC}"
+    for i in "${!all_sites[@]}"; do
+        local my=""
+        is_my_site "${all_sites[$i]}" && my=" (свой)" || my=" (внешний)"
+        echo "$((i+1))) ${all_sites[$i]}$my"
+    done
     read -p "Номер для удаления (0 - отмена): " num
-    if [[ "$num" =~ ^[0-9]+$ ]] && (( num > 0 && num <= ${#sites[@]} )); then
-        delete_site "${sites[$((num-1))]}" && reload_nginx
+    if [[ "$num" =~ ^[0-9]+$ ]] && (( num > 0 && num <= ${#all_sites[@]} )); then
+        delete_site "${all_sites[$((num-1))]}" && reload_nginx
     else
         echo -e "${YELLOW}Отмена.${NC}"
     fi
@@ -357,21 +662,140 @@ delete_site_wizard() {
 }
 
 toggle_site_wizard() {
-    local sites=($(get_my_sites))
-    [[ ${#sites[@]} -eq 0 ]] && echo -e "${YELLOW}Нет сайтов.${NC}" && press_any_key && return
-    echo -e "${GREEN}Ваши сайты:${NC}"
-    for i in "${!sites[@]}"; do
+    local all_sites=($(get_all_sites))
+    [[ ${#all_sites[@]} -eq 0 ]] && echo -e "${YELLOW}Нет сайтов.${NC}" && press_any_key && return
+    echo -e "${GREEN}Доступные сайты:${NC}"
+    for i in "${!all_sites[@]}"; do
         local status=""
-        [[ -L "$NGINX_ENABLED/${sites[$i]}.conf" ]] && status=" (включён)" || status=" (выключен)"
-        echo "$((i+1))) ${sites[$i]}$status"
+        if [[ -L "$NGINX_ENABLED/${all_sites[$i]}.conf" || -L "$NGINX_ENABLED/${all_sites[$i]}" ]]; then
+            status=" (включён)"
+        else
+            status=" (выключен)"
+        fi
+        local my=""
+        is_my_site "${all_sites[$i]}" && my=" (свой)" || my=" (внешний)"
+        echo "$((i+1))) ${all_sites[$i]}$my$status"
     done
     read -p "Номер для переключения: " num
-    if [[ "$num" =~ ^[0-9]+$ ]] && (( num > 0 && num <= ${#sites[@]} )); then
-        toggle_site "${sites[$((num-1))]}" && reload_nginx
+    if [[ "$num" =~ ^[0-9]+$ ]] && (( num > 0 && num <= ${#all_sites[@]} )); then
+        toggle_site "${all_sites[$((num-1))]}" && reload_nginx
     else
         echo -e "${YELLOW}Отмена.${NC}"
     fi
     press_any_key
+}
+
+# ---- SSL (Certbot) с новой функцией интерактивного запуска и проверкой в меню ----
+ssl_interactive() {
+    echo -e "${GREEN}=== Запуск Certbot в интерактивном режиме ===${NC}"
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен.${NC}"
+        return
+    fi
+    echo -e "${YELLOW}Будет запущен certbot --nginx.${NC}"
+    echo -e "Вы сможете выбрать домены из списка и настроить сертификат."
+    read -p "Продолжить? (y/n): " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        certbot --nginx
+        echo -e "${GREEN}Завершено.${NC}"
+        systemctl reload nginx 2>/dev/null
+    else
+        echo -e "${YELLOW}Отмена.${NC}"
+    fi
+    press_any_key
+}
+
+ssl_get_cert() {
+    echo -e "${GREEN}=== Получение SSL-сертификата ===${NC}"
+    read -p "Введите домен (например, example.com): " domain
+    if [[ -z "$domain" ]]; then
+        echo -e "${RED}Домен не может быть пустым${NC}"
+        return
+    fi
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен. Сначала установите его через пункт 6.${NC}"
+        return
+    fi
+    read -p "Включить поддомен www? (y/n, по умолчанию y): " include_www
+    include_www=${include_www:-y}
+    local domains="-d $domain"
+    if [[ "$include_www" == "y" || "$include_www" == "Y" ]]; then
+        domains="$domains -d www.$domain"
+    fi
+    echo -e "${YELLOW}Запуск certbot для $domains ...${NC}"
+    if certbot --nginx $domains; then
+        echo -e "${GREEN}Сертификат успешно получен. Перезагружаем Nginx...${NC}"
+        systemctl reload nginx
+    else
+        echo -e "${RED}Ошибка при получении сертификата. Проверьте логи.${NC}"
+    fi
+    press_any_key
+}
+
+ssl_renew() {
+    echo -e "${GREEN}=== Обновление всех сертификатов ===${NC}"
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен.${NC}"
+        return
+    fi
+    certbot renew
+    echo -e "${GREEN}Обновление завершено.${NC}"
+    press_any_key
+}
+
+ssl_list() {
+    echo -e "${GREEN}=== Существующие сертификаты ===${NC}"
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен.${NC}"
+        return
+    fi
+    certbot certificates
+    press_any_key
+}
+
+ssl_menu() {
+    clear
+    echo "======================================"
+    echo "      Управление SSL сертификатами"
+    echo "======================================"
+    
+    # Проверка установки certbot
+    if ! command -v certbot &> /dev/null; then
+        echo -e "${RED}Certbot не установлен.${NC}"
+        echo -e "${YELLOW}Хотите установить его сейчас? (y/n)${NC}"
+        read -p "> " install_cert
+        if [[ "$install_cert" == "y" || "$install_cert" == "Y" ]]; then
+            apt update
+            apt install -y certbot python3-certbot-nginx
+            if command -v certbot &> /dev/null; then
+                echo -e "${GREEN}Certbot успешно установлен.${NC}"
+            else
+                echo -e "${RED}Ошибка установки.${NC}"
+                press_any_key
+                return
+            fi
+        else
+            echo -e "${YELLOW}Без Certbot SSL-функции недоступны.${NC}"
+            press_any_key
+            return
+        fi
+    fi
+
+    echo "1. Получить сертификат для домена (с www)"
+    echo "2. Обновить все сертификаты"
+    echo "3. Показать существующие сертификаты"
+    echo "4. Запустить certbot --nginx (интерактивный режим)"
+    echo "0. Назад"
+    echo "======================================"
+    read -p "Выберите пункт: " choice
+    case $choice in
+        1) ssl_get_cert ;;
+        2) ssl_renew ;;
+        3) ssl_list ;;
+        4) ssl_interactive ;;
+        0) return ;;
+        *) echo -e "${RED}Неверный выбор${NC}" ; press_any_key ;;
+    esac
 }
 
 press_any_key() {
@@ -387,14 +811,18 @@ menu() {
     echo "      Управление сайтами nginx"
     echo "======================================"
     echo "1. Создать сайт"
-    echo "2. Список моих сайтов"
+    echo "2. Список всех сайтов"
     echo "3. Удалить сайт"
     echo "4. Вкл/Выкл сайт"
     echo "5. Перезагрузить nginx"
     echo "6. Установить пакеты (PHP, MySQL, PostgreSQL, SQLite3, Certbot)"
+    echo "7. SSL сертификаты (Certbot)"
+    echo "8. Управление портами (UFW)"
+    echo "9. Настроить Certbot hooks (ufw: открыть/закрыть порт 80)"
+    echo "10. Информация о скрипте и удаление"
     echo "0. Выход"
     echo "======================================"
-    read -p "Выберите пункт [1-0]: " choice
+    read -p "Выберите пункт [0-10]: " choice
     case $choice in
         1) create_site_wizard ;;
         2) list_my_sites; press_any_key ;;
@@ -402,6 +830,10 @@ menu() {
         4) toggle_site_wizard ;;
         5) reload_nginx; press_any_key ;;
         6) check_packages ;;
+        7) ssl_menu ;;
+        8) manage_ufw ;;
+        9) configure_certbot_hooks ;;
+        10) about_and_remove ;;
         0) echo -e "${GREEN}До свидания!${NC}"; exit 0 ;;
         *) echo -e "${RED}Неверный выбор${NC}"; press_any_key ;;
     esac
